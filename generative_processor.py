@@ -4,7 +4,6 @@ from langchain.vectorstores import ElasticsearchStore
 from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-import boto3
 from datetime import datetime
 import logging
 import os
