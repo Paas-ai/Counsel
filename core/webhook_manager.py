@@ -6,7 +6,7 @@ from typing import Dict, Optional, Any
 import logging
 from app.config import Config
 from .database import update_processing_status
-from .generative_processor import LangchainProcessor
+from .generative_processor import LlmProcessor
 from celery import Celery
 from celery.result import AsyncResult
 import aiohttp
@@ -14,6 +14,7 @@ import asyncio
 import json
 import hashlib
 from cryptography.fernet import Fernet
+from .conversation_manager import ConversationManager
 from .redis_connection import get_redis_service
 
 logger = logging.getLogger(__name__)
@@ -21,104 +22,7 @@ logger = logging.getLogger(__name__)
 
 # Initialize Celery and Redis
 celery = Celery('audio_processing', broker='redis://localhost:6379/0')
-
-class ConversationManager:
-    def __init__(self):
-        self.redis_service = get_redis_service()
-
-    async def create_conversation(self, user_id):
-        """Create a new conversation and return conversation_id"""
-        try:
-            conversation_id = str(uuid.uuid4())
-            conversation_data = {
-                'user_id': user_id,
-                'started_at': datetime.utcnow().isoformat(),
-                'status': 'active'
-            }
-            
-            # Store conversation data in Redis
-            self.redis_service.set_with_expiry(
-                f"conversation:{conversation_id}",
-                json.dumps(conversation_data),
-                3600  # Expire after 1 hour of inactivity
-            )
-            
-            logger.info(f"Created new conversation {conversation_id} for user {user_id}")
-            return conversation_id
-            
-        except Exception as e:
-            logger.error(f"Error creating conversation: {str(e)}")
-            raise
-
-    async def end_conversation(self, conversation_id):
-        """Mark conversation as completed"""
-        try:
-            conversation_key = f"conversation:{conversation_id}"
-            conversation_data = self.redis_service.get_value(conversation_key)
-            
-            if conversation_data:
-                data = json.loads(conversation_data)
-                data['status'] = 'completed'
-                data['ended_at'] = datetime.utcnow().isoformat()
-                
-                # Update conversation data
-                self.redis_service.set_with_expiry(
-                    conversation_key,
-                    json.dumps(data),
-                    3600  # Keep completed conversation data for 1 hour
-                )
-                
-                # Clean up any associated config data
-                self.redis_service.delete_key(f"service_config:{conversation_id}")
-                
-                logger.info(f"Ended conversation {conversation_id}")
-                
-        except Exception as e:
-            logger.error(f"Error ending conversation: {str(e)}")
-            raise
-
-    async def validate_conversation(self, conversation_id):
-        """Check if conversation exists and is active"""
-        try:
-            conversation_key = f"conversation:{conversation_id}"
-            conversation_data = self.redis_service.get_value(conversation_key)
-            
-            if not conversation_data:
-                raise ValueError("Conversation not found")
-                
-            data = json.loads(conversation_data)
-            if data['status'] != 'active':
-                raise ValueError("Conversation is not active")
-                
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error validating conversation: {str(e)}")
-            raise
-            
-    async def get_service_config(self, conversation_id):
-        """Get cached service configuration parameters"""
-        try:
-            config_key = f"service_config:{conversation_id}"
-            config_data = self.redis_service.get_value(config_key)
-            return json.loads(config_data) if config_data else None
-        except Exception as e:
-            logger.error(f"Error getting service config: {str(e)}")
-            return None
-
-    async def store_service_config(self, conversation_id, config_data):
-        """Store service configuration parameters"""
-        try:
-            config_key = f"service_config:{conversation_id}"
-            self.redis_service.set_with_expiry(
-                config_key,
-                json.dumps(config_data),
-                3600  # Cache for 1 hour
-            )
-        except Exception as e:
-            logger.error(f"Error storing service config: {str(e)}")
-            raise
-            
+           
 class WebhookManager:
     def __init__(self):
         self.max_retries = Config.WEBHOOK_MAX_RETRIES
@@ -278,7 +182,7 @@ class WebhookEvents:
             logger.error(f"Error fetching service config: {str(e)}")
             raise
             
-    async def process_asr_nmt(self, audio_path, user_id, session, status_data, conversation_id, config_arguments) -> Dict[str, Any]:
+    async def process_asr_nmt(self, query_audio_b64, user_id, session, status_data, conversation_id, config_arguments) -> Dict[str, Any]:
         """Handle ASR_NMT processing"""
         try:
             status_data['steps'].append({
@@ -348,13 +252,13 @@ class WebhookEvents:
                             "inputData": {
                                 "audio": [
                                     {
-                                        "audioContent": "{{generated_base64_content}}"
+                                        "audioContent": query_audio_b64
                                     }
                                 ]
                             }
                         } 
               
-            translated_response = await WebhookManager.send_webhook(
+            translated_content = await WebhookManager.send_webhook(
                 'asr_nmt',
                 stt_payload,
                 session,
@@ -370,7 +274,7 @@ class WebhookEvents:
             
             await WebhookEvents.update_status(user_id, status_data)
             
-            return translated_response
+            return translated_content
             
         except Exception as e:
             status_data['steps'][-1].update({
@@ -485,7 +389,7 @@ class WebhookEvents:
     
     @staticmethod
     @celery.task
-    async def process_audio(self, audio_path, user_id, conversation_id=None):
+    async def process_audio(self, query_audio_b64, user_id, user_language, conversation_id, status_data, session):
         status_data = {
             'user_id': user_id,
             'status': 'processing_started',
@@ -513,7 +417,7 @@ class WebhookEvents:
                 
                 # Process ASR_NMT with config parameters
                 asr_nmt_response = await self.process_asr_nmt(
-                    audio_path, 
+                    query_audio_b64, 
                     user_id, 
                     session, 
                     status_data, 
@@ -521,13 +425,6 @@ class WebhookEvents:
                     config_arguments
                 )
 
-                '''status_data.update({
-                    'status': 'completed',
-                    'completed_at': datetime.utcnow().isoformat()
-                })
-                await self.update_status(user_id, status_data)
-                '''
-                
                 # Find the Translation task in asr_nmt_response
                 translation_task = next((task for task in asr_nmt_response.get('pipelineResponse', [])
                                      if task['taskType'] == 'translation'), None)
@@ -536,7 +433,7 @@ class WebhookEvents:
                     prompt = translation_task['output'][0].get('target', None)
                 
                 # Initialize LLM processor
-                llm_processor = LangchainProcessor()
+                llm_processor = LlmProcessor()
                 
                 #get llm_response
                 llm_response = await llm_processor.process_text(
@@ -570,13 +467,23 @@ class WebhookEvents:
                     config_arguments
                 )
 
+                 # Find the tts task in nmt_tts_response
+                tts_task = next((task for task in nmt_tts_response.get('pipelineResponse',[])
+                                if task['tasktype'] == 'tts'), None)
+                if tts_task:
+                    audio_format = tts_task['config'].get('audioFormat', None)
+                    sampling_rate = tts_task['config'].get('samplingRate', None)
+                    resopnse_audio_b64 = tts_task['audio'][0].get('audioContent', None)
+                
                 return {
                     'status': 'success',
                     'conversation_id': conversation_id,
                     'processing_status': status_data,
                     'results': {
                     'original_text': prompt,
-                    'llm_response': llm_response.get('response', ''),
+                    'response_audio_base64': resopnse_audio_b64, 
+                    'audio_format' : audio_format,
+                    'sampling_rate': sampling_rate,
                     'metadata': llm_response.get('metadata', {})
                     }
                 }

@@ -52,7 +52,8 @@ def init_db():
                     email VARCHAR(255),
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                     last_login TIMESTAMP WITH TIME ZONE,
-                    is_active BOOLEAN DEFAULT FALSE
+                    is_active BOOLEAN DEFAULT FALSE,
+                    processing_status JSONB DEFAULT '{}'
                 )
             ''')
 
@@ -83,6 +84,34 @@ def init_db():
                 )
             ''')
             
+            # Create conversations table
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                    user_id UUID NOT NULL,
+                    started_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    last_activity TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    ended_at TIMESTAMP WITH TIME ZONE,
+                    status VARCHAR(20) DEFAULT 'active', -- 'active', 'completed'
+                    message_count INTEGER DEFAULT 0,
+                    metadata JSONB DEFAULT '{}',
+                    FOREIGN KEY (user_id) REFERENCES users(id)
+                )
+            ''')
+            
+            # Create conversation_message table
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS conversation_messages (
+                    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                    conversation_id UUID NOT NULL,
+                    role VARCHAR(20) NOT NULL, -- 'user' or 'assistant'
+                    content TEXT,
+                    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    metadata JSONB DEFAULT '{}',
+                    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+                )
+            ''')
+
             # Create indices
             cur.execute('CREATE INDEX IF NOT EXISTS idx_users_mobile ON users(mobile_number)')
             cur.execute('CREATE INDEX IF NOT EXISTS idx_users_sub ON users(sub)')

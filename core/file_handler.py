@@ -25,55 +25,80 @@ class FileHandler:
         return '.' in filename and \
             filename.rsplit('.', 1)[1].lower() in self.allowed_extensions
 
-    def secure_save_file(self, file, user_id, conversation_id, message_type='query'):
+    def secure_save_file(self, file_input, user_id, conversation_id, message_type='query'):
         """
-        Securely saves the uploaded file with conversation context and validation
+        Securely saves the file with conversation context and validation
         
         Args:
-            file: The uploaded file
+            file_input: Either a FileStorage object from Flask or bytes data
             user_id: ID of the user
             conversation_id: Current conversation ID
             message_type: 'query' for user messages, 'response' for system responses
         """
         try:
-            if not file:
+            # Validate file_input is provided
+            if not file_input:
                 raise ValueError("No file provided")
-
-            original_filename = file.filename
-            if not original_filename:
-                raise ValueError("No filename provided")
-
-            safe_filename = secure_filename(original_filename)
-            if not safe_filename:
-                raise ValueError("Invalid filename")
-
-            if not self.allowed_file(safe_filename):
-                raise ValueError(f"File type not allowed. Allowed types: {', '.join(self.allowed_extensions)}")
-            
-            # Create conversation directory if it doesn't exist
-            conversation_path = os.path.join(
-                self.upload_folder,
-                str(user_id),
-                str(conversation_id)
-            )
+                
             # Ensure upload folder exists
-            os.makedirs(conversation_path, exist_ok=True)
+            os.makedirs(self.upload_folder, exist_ok=True)
+            
+            # Create user-specific directory
+            user_dir = os.path.join(self.upload_folder, f"user_{user_id}")
+            os.makedirs(user_dir, exist_ok=True)
+            
+            # Create conversation-specific directory if needed
+            if conversation_id:
+                conv_dir = os.path.join(user_dir, f"conv_{conversation_id}")
+                os.makedirs(conv_dir, exist_ok=True)
+                file_dir = conv_dir
+            else:
+                file_dir = user_dir
 
             # Add timestamp and UUID for uniqueness
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             unique_id = str(uuid.uuid4())[:8]
-            final_filename = f"{timestamp}_{unique_id}_{safe_filename}"
             
-            # Save file in conversation directory
-            safe_path = os.path.join(conversation_path, final_filename)
-            file.save(safe_path)
+            if hasattr(file_input, 'filename'):
+                # It's a Flask FileStorage object
+                original_filename = file_input.filename
+                if not original_filename:
+                    raise ValueError("No filename provided")
+
+                safe_filename = secure_filename(original_filename)
+                if not safe_filename:
+                    raise ValueError("Invalid filename")
+
+                if not self.allowed_file(safe_filename):
+                    raise ValueError(f"File type not allowed. Allowed types: {', '.join(self.allowed_extensions)}")
+                    
+                final_filename = f"{timestamp}_{unique_id}_{safe_filename}"
+                # Save file to path
+                safe_path = os.path.join(file_dir, final_filename)
+                file_input.save(safe_path)
+            else:
+                # Check if bytes data is valid
+                if len(file_input) == 0:
+                    raise ValueError("Empty file data provided")
+                    
+                # Determine extension based on message_type
+                extension = 'mp3' if message_type == 'response' else 'wav'
+                final_filename = f"{timestamp}_{unique_id}.{extension}"
+                safe_path = os.path.join(file_dir, final_filename)
+                
+                # Write bytes to file
+                with open(safe_path, 'wb') as f:
+                    f.write(file_input)
+
+            # Calculate relative path from upload folder root
+            relative_path = os.path.relpath(safe_path, self.upload_folder)
 
             return {
                 'success': True,
-                'original_name': file.filename,
+                'original_name': getattr(file_input, 'filename', final_filename),
                 'saved_as': final_filename,
                 'full_path': safe_path,
-                'relative_path': os.path.join(str(user_id), str(conversation_id), final_filename)
+                'relative_path': relative_path
             }
 
         except Exception as e:
