@@ -10,10 +10,8 @@ import json
 import logging
 import os
 import boto3
-import numpy as np
-from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional, Any, Tuple, Union
+from typing import Dict, List, Optional, Any, Tuple
 
 # LlamaIndex imports
 from llama_index import (
