@@ -16,7 +16,7 @@ Features:
 import uuid
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, List, Any, Union
 
 # Local imports
@@ -69,8 +69,8 @@ class ConversationManager:
             conversation_data = {
                 'id': conversation_id,
                 'user_id': user_id,
-                'started_at': datetime.utcnow().isoformat(),
-                'last_activity': datetime.utcnow().isoformat(),
+                'started_at': datetime.now(timezone.utc).isoformat(),
+                'last_activity': datetime.now(timezone.utc).isoformat(),
                 'status': 'active',
                 'message_count': 0,
                 'metadata': metadata or {}
@@ -83,7 +83,7 @@ class ConversationManager:
                 self.max_inactivity  # Expire after inactivity period
             )
             
-            # Store user-conversation mapping
+            # Store user-to-conversation mapping
             user_conversations_key = f"user:{user_id}:conversations"
             current_conversations = json.loads(
                 await self.redis_service.get_value(user_conversations_key) or '[]'
@@ -452,117 +452,6 @@ class ConversationManager:
         except Exception as e:
             logger.error(f"Error getting conversation messages: {str(e)}")
             return []
-    
-    async def add_message(self, 
-                       conversation_id: str, 
-                       role: str, 
-                       content: str,
-                       metadata: Optional[Dict[str, Any]] = None) -> str:
-        """
-        Add a message to a conversation.
-        
-        Args:
-            conversation_id: Conversation identifier
-            role: Message role ('user' or 'assistant')
-            content: Message content
-            metadata: Optional message metadata
-            
-        Returns:
-            Message ID
-        """
-        try:
-            # Validate conversation
-            conversation_data = await self.validate_conversation(conversation_id)
-            
-            # Check if conversation has reached message limit
-            if conversation_data['message_count'] >= self.max_messages_per_conversation:
-                raise ValueError(f"Conversation {conversation_id} has reached the maximum message limit")
-            
-            # Generate message ID
-            message_id = str(uuid.uuid4())
-            
-            # Create message data
-            message_data = {
-                'id': message_id,
-                'role': role,
-                'content': content,
-                'timestamp': datetime.utcnow().isoformat(),
-                'metadata': metadata or {}
-            }
-            
-            # Update conversation history in Redis
-            conversation_history_key = f"conversation_history:{conversation_id}"
-            history = json.loads(
-                await self.redis_service.get_value(conversation_history_key) or '[]'
-            )
-            
-            # Add new message
-            history.append(message_data)
-            
-            # Store updated history
-            await self.redis_service.set_with_expiry(
-                conversation_history_key,
-                json.dumps(history),
-                self.max_inactivity
-            )
-            
-            # Update conversation message count
-            conversation_key = f"conversation:{conversation_id}"
-            conversation_data = json.loads(
-                await self.redis_service.get_value(conversation_key) or '{}'
-            )
-            
-            if conversation_data:
-                conversation_data['message_count'] = conversation_data.get('message_count', 0) + 1
-                conversation_data['last_activity'] = datetime.utcnow().isoformat()
-                
-                await self.redis_service.set_with_expiry(
-                    conversation_key,
-                    json.dumps(conversation_data),
-                    self.max_inactivity
-                )
-            
-            # Store in database
-            conn = await get_db()
-            try:
-                async with conn.cursor() as cursor:
-                    # Insert message
-                    if metadata:
-                        metadata_json = json.dumps(metadata)
-                    else:
-                        metadata_json = '{}'
-                        
-                    await cursor.execute('''
-                        INSERT INTO conversation_messages (
-                            id, conversation_id, role, content, 
-                            timestamp, metadata
-                        ) VALUES (%s, %s, %s, %s, %s, %s)
-                    ''', (
-                        message_id,
-                        conversation_id,
-                        role,
-                        content,
-                        datetime.utcnow(),
-                        metadata_json
-                    ))
-                    
-                    # Update conversation message count
-                    await cursor.execute('''
-                        UPDATE conversations
-                        SET message_count = message_count + 1,
-                            last_activity = %s
-                        WHERE id = %s
-                    ''', (datetime.utcnow(), conversation_id))
-                    
-                    await conn.commit()
-            finally:
-                conn.close()
-            
-            return message_id
-            
-        except Exception as e:
-            logger.error(f"Error adding message: {str(e)}")
-            raise
     
     async def get_service_config(self, conversation_id: str) -> Optional[Dict[str, Any]]:
         """
